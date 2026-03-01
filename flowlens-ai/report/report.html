@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FlowLens AI - Report</title>
+    <link rel="stylesheet" href="report.css">
+</head>
+<body>
+    <div class="container">
+
+        <!-- Header -->
+        <header class="header">
+            <div class="header-top">
+                <span class="logo">FlowLens AI</span>
+                <span class="mode-badge" id="mode-badge">OFFLINE</span>
+            </div>
+            <h1>Product Teardown Report</h1>
+            <div class="header-meta">
+                <span id="hostname">—</span>
+                <span id="date">—</span>
+            </div>
+        </header>
+
+        <!-- Scores -->
+        <h2>UX Scores</h2>
+        <div class="scores-row">
+            <div class="score-item" id="score-navigation">
+                <div class="score-number" id="score-navigation-value">-</div>
+                <div class="score-name">Navigation</div>
+            </div>
+            <div class="score-item" id="score-clarity">
+                <div class="score-number" id="score-clarity-value">-</div>
+                <div class="score-name">Clarity</div>
+            </div>
+            <div class="score-item" id="score-speed">
+                <div class="score-number" id="score-speed-value">-</div>
+                <div class="score-name">Speed</div>
+            </div>
+            <div class="score-item" id="score-accessibility">
+                <div class="score-number" id="score-accessibility-value">-</div>
+                <div class="score-name">Accessibility</div>
+            </div>
+            <div class="score-item overall" id="score-overall">
+                <div class="score-number" id="score-overall-value">-</div>
+                <div class="score-name">Overall</div>
+            </div>
+        </div>
+
+        <!-- Summary -->
+        <h2>Summary</h2>
+        <div class="summary-text" id="summary-text">Loading...</div>
+
+        <!-- Stats -->
+        <h2>Session Overview</h2>
+        <div class="stats-row">
+            <div class="stat-item">
+                <div class="stat-value" id="stat-clicks">-</div>
+                <div class="stat-label">Clicks</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="stat-pages">-</div>
+                <div class="stat-label">Pages</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="stat-rage-clicks">-</div>
+                <div class="stat-label">Rage Clicks</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="stat-dead-clicks">-</div>
+                <div class="stat-label">Dead Clicks</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="stat-duration">-</div>
+                <div class="stat-label">Duration</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="stat-scroll-depth">-</div>
+                <div class="stat-label">Avg Scroll</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="stat-navigations">-</div>
+                <div class="stat-label">Navigations</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="stat-unique-pages">-</div>
+                <div class="stat-label">Unique Pages</div>
+            </div>
+        </div>
+
+        <!-- Journey -->
+        <h2>User Journey</h2>
+        <div id="journey-flow" class="journey-flow">
+            <p class="empty">Loading...</p>
+        </div>
+
+        <!-- URL Analysis -->
+        <h2>URL-Level Analysis</h2>
+        <div class="table-wrap">
+            <table class="url-table">
+                <thead>
+                    <tr>
+                        <th>Page</th>
+                        <th>Title</th>
+                        <th>Visits</th>
+                        <th>Time</th>
+                        <th>Scroll</th>
+                        <th>Fold</th>
+                        <th>Clicks</th>
+                        <th>Rage</th>
+                        <th>Dead</th>
+                        <th>Engagement</th>
+                    </tr>
+                </thead>
+                <tbody id="url-metrics-body">
+                    <tr><td colspan="10" class="empty">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Pain Points -->
+        <h2>Pain Points</h2>
+        <div id="pain-points-list">
+            <p class="empty">Loading...</p>
+        </div>
+
+        <!-- Suggestions -->
+        <h2>Suggestions</h2>
+        <div id="suggestions-list">
+            <p class="empty">Loading...</p>
+        </div>
+
+        <!-- Export -->
+        <div class="export-row">
+            <button class="btn btn-primary" id="exportPdf">Export PDF</button>
+            <button class="btn" id="exportJson">Export JSON</button>
+            <button class="btn" id="shareLink">Copy Link</button>
+        </div>
+
+        <footer class="footer">
+            Built with FlowLens AI — by Ankit Lamba
+        </footer>
+    </div>
+
+    <script src="report.js"></script>
+</body>
+</html>
