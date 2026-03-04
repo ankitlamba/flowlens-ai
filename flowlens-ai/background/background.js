@@ -1,9 +1,11 @@
 // FlowLens AI - Background Service Worker (Manifest V3)
+// Processes real user session data via Claude Haiku API
 
 const API_ENDPOINT = 'https://api.anthropic.com/v1/messages';
-const MODEL = 'claude-haiku-4-5-20251001'; // Using Haiku for speed + cost efficiency
+const MODEL = 'claude-haiku-4-5-20251001';
 const API_KEY_STORAGE_KEY = 'flowlens_api_key';
 const REPORTS_STORAGE_KEY = 'flowlens_reports';
+const SESSION_DATA_KEY = 'flowlens_session_data';
 const RECORDING_STATE_KEY = 'flowlens_recording_state';
 
 /**
@@ -52,9 +54,6 @@ async function handleMessage(request, sender) {
 
     case 'CHECK_API_KEY':
       return handleCheckApiKey();
-
-    case 'EXPORT_REPORT':
-      return handleExportReport(request.reportId);
 
     case 'GET_RECORDING_STATE':
       return handleGetRecordingState();
@@ -122,68 +121,21 @@ function updateBadgeForRecording(isRecording) {
 
 /**
  * Handle GENERATE_REPORT action
- * Reads tracking data from storage, tries AI analysis, falls back to offline analysis
+ * Reads session data via getData() from storage, tries AI analysis, falls back to offline
  */
 async function handleGenerateReport() {
   try {
-    // 1. Read tracking data from storage
-    const storage = await chrome.storage.local.get([
-      'flowlens_clicks',
-      'flowlens_pages_visited',
-      'flowlens_rage_clicks',
-      'flowlens_dead_clicks',
-      'flowlens_navigations',
-      'flowlens_last_session_data',
-      'flowlens_start_time',
-      'flowlens_session_id',
-      'flowlens_url_metrics'
-    ]);
+    // 1. Read session data from storage (via tracker's getData() output)
+    const storage = await chrome.storage.local.get(SESSION_DATA_KEY);
+    const sessionData = safeParseJSON(storage[SESSION_DATA_KEY], null);
 
-    const clicks = safeParseJSON(storage.flowlens_clicks, []);
-    const pages = safeParseJSON(storage.flowlens_pages_visited, []);
-    const rageClicks = safeParseJSON(storage.flowlens_rage_clicks, []);
-    const deadClicks = safeParseJSON(storage.flowlens_dead_clicks, []);
-    const navigations = safeParseJSON(storage.flowlens_navigations, []);
-    const lastSessionData = safeParseJSON(storage.flowlens_last_session_data, null);
-    const urlMetrics = safeParseJSON(storage.flowlens_url_metrics, {});
-
-    // Ensure startTime is numeric
-    const startTime = storage.flowlens_start_time
-      ? parseInt(storage.flowlens_start_time, 10)
-      : (lastSessionData?.startTime || Date.now());
-
-    // Calculate average scroll depth from URL metrics or lastSessionData
-    let avgScrollDepthAcrossPages = lastSessionData?.avgScrollDepthAcrossPages || 0;
-    if (!avgScrollDepthAcrossPages && urlMetrics && Object.keys(urlMetrics).length > 0) {
-      const depths = Object.values(urlMetrics).map(m => m.maxScrollDepth || 0);
-      avgScrollDepthAcrossPages = depths.length > 0
-        ? Math.round(depths.reduce((a, b) => a + b, 0) / depths.length)
-        : 0;
+    if (!sessionData || !sessionData.session) {
+      throw new Error('No session data found. Please record a session first.');
     }
 
-    const trackingData = {
-      sessionId: storage.flowlens_session_id || 'unknown',
-      startTime: startTime,
-      endTime: Date.now(),
-      totalClicks: clicks.length,
-      totalPages: pages.length,
-      totalRageClicks: rageClicks.length,
-      totalDeadClicks: deadClicks.length,
-      totalNavigations: navigations.length,
-      totalScrollEvents: lastSessionData?.totalScrollEvents || lastSessionData?.scrollEvents || 0,
-      avgScrollDepthAcrossPages: avgScrollDepthAcrossPages,
-      clicks: clicks.slice(0, 50),
-      pages: pages,
-      rageClicks: rageClicks,
-      deadClicks: deadClicks,
-      navigations: navigations,
-      urlMetrics: urlMetrics,
-      hostname: lastSessionData?.hostname || getHostnameFromPages(pages),
-      url: lastSessionData?.url || pages[0]?.url || 'unknown'
-    };
-
-    if (clicks.length === 0 && pages.length === 0) {
-      throw new Error('No tracking data found. Please record a session first.');
+    // Validate required data
+    if (!sessionData.pages || sessionData.pages.length === 0) {
+      throw new Error('No pages recorded in session. Recording must capture at least one page.');
     }
 
     // 2. Try AI-powered analysis, fall back to offline
@@ -195,22 +147,22 @@ async function handleGenerateReport() {
 
     if (apiKey) {
       try {
-        const prompt = buildAnalysisPrompt(trackingData);
+        const prompt = buildAIAnalysisPrompt(sessionData);
         const response = await callClaudeAPI(apiKey, prompt);
         const jsonMatch = response.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
           report = JSON.parse(jsonMatch[0]);
         } else {
-          report = generateOfflineReport(trackingData);
+          report = generateOfflineReport(sessionData);
           reportMode = 'offline';
         }
       } catch (aiError) {
         console.log('AI analysis failed, using offline mode:', aiError.message);
-        report = generateOfflineReport(trackingData);
+        report = generateOfflineReport(sessionData);
         reportMode = 'offline';
       }
     } else {
-      report = generateOfflineReport(trackingData);
+      report = generateOfflineReport(sessionData);
       reportMode = 'offline';
     }
 
@@ -219,9 +171,9 @@ async function handleGenerateReport() {
     const reportData = {
       id: reportId,
       timestamp: new Date().toISOString(),
-      hostname: trackingData.hostname,
-      url: trackingData.url,
-      trackingData: trackingData,
+      hostname: sessionData.session.hostname,
+      url: sessionData.session.url,
+      sessionData: sessionData,
       report: report,
       mode: reportMode,
     };
@@ -243,360 +195,548 @@ async function handleGenerateReport() {
 
 /**
  * Generate a report offline using pure data analysis (no AI API needed)
+ * sessionData: { session, rawEvents, pages, signals, navigations, metrics }
  */
-function generateOfflineReport(data) {
-  const hostname = data.hostname || 'the website';
-  const duration = data.startTime ? Math.round((data.endTime - parseInt(data.startTime)) / 1000) : 0;
-  const avgTimePerPage = data.pages.length > 0
-    ? Math.round(data.pages.reduce((sum, p) => sum + (p.timeSpent || 0), 0) / data.pages.length / 1000)
+function generateOfflineReport(sessionData) {
+  const { session, pages = [], signals = [], navigations = [], metrics = {} } = sessionData;
+  const hostname = session.hostname || 'the website';
+  const duration = Math.round((session.endTime - session.startTime) / 1000);
+
+  // Calculate metrics from pages array
+  const avgTimePerPage = pages.length > 0
+    ? Math.round(pages.reduce((sum, p) => sum + (p.timeSpent || 0), 0) / pages.length / 1000)
     : 0;
 
-  // Calculate scores based on real data
-  const rageClickRatio = data.totalClicks > 0 ? data.totalRageClicks / data.totalClicks : 0;
-  const deadClickRatio = data.totalClicks > 0 ? data.totalDeadClicks / data.totalClicks : 0;
-  const avgScrollDepth = data.pages.length > 0
-    ? Math.round(data.pages.reduce((sum, p) => sum + (p.scrollDepth || 0), 0) / data.pages.length)
+  const avgScrollDepth = pages.length > 0
+    ? Math.round(pages.reduce((sum, p) => sum + (p.maxScrollDepth || 0), 0) / pages.length)
     : 0;
 
-  const navigationScore = Math.max(2, Math.round(10 - (rageClickRatio * 30) - (data.totalNavigations < 2 ? 2 : 0)));
-  const clarityScore = Math.max(2, Math.round(10 - (deadClickRatio * 25)));
-  const speedScore = Math.max(2, Math.round(avgTimePerPage < 10 ? 8 : avgTimePerPage < 30 ? 6 : 4));
-  const accessibilityScore = Math.max(2, Math.round(avgScrollDepth > 50 ? 7 : 5));
-  const overallScore = Math.round((navigationScore + clarityScore + speedScore + accessibilityScore) / 4);
+  const avgTTFA = pages.length > 0
+    ? Math.round(pages.reduce((sum, p) => sum + (p.ttfa || 0), 0) / pages.length / 1000)
+    : 0;
 
-  // Build pain points from real data
-  const painPoints = [];
+  const rageClickCount = metrics.rageClickCount || 0;
+  const deadClickCount = metrics.deadClickCount || 0;
+  const backNavigationCount = metrics.backNavigationCount || 0;
+  const hoverHesitationCount = metrics.hoverHesitationCount || 0;
+  const idleClusterCount = metrics.idleClusterCount || 0;
+  const totalClicks = metrics.totalClicks || 0;
+  const uniquePages = metrics.uniquePages || metrics.totalPages || pages.length;
+  const totalPages = metrics.totalPages || pages.length;
+  const totalSteps = metrics.totalSteps || navigations.length;
 
-  if (data.totalRageClicks > 0) {
-    const topRage = data.rageClicks[0];
-    painPoints.push({
-      title: `Rage clicks detected (${data.totalRageClicks} instances)`,
-      description: `Users rapidly clicked on elements ${data.totalRageClicks} time(s), indicating frustration with unresponsive or confusing UI elements.`,
-      severity: data.totalRageClicks >= 3 ? 'high' : 'medium',
-      evidence: topRage ? `Element "${topRage.text || topRage.selector}" (${topRage.role}) received ${topRage.clickCount} rapid clicks on ${shortenUrl(topRage.url)}` : 'Multiple rage click events detected'
-    });
-  }
+  // Calculate scores (0-100 base, then penalties) — return as objects
+  const navigationScore = calculateNavigationScore(backNavigationCount, rageClickCount, totalPages);
+  const clarityScore = calculateClarityScore(deadClickCount, hoverHesitationCount, avgTTFA);
+  const speedFeelScore = calculateSpeedFeel(avgTimePerPage, idleClusterCount);
+  const accessibilityScore = calculateAccessibility(pages);
+  const overallFinal = Math.round(
+    navigationScore.final * 0.3 + clarityScore.final * 0.3 + speedFeelScore.final * 0.2 + accessibilityScore.final * 0.2
+  );
+  const overallScore = {
+    base: 100,
+    penalties: [],
+    final: overallFinal,
+    formula: 'nav*0.3 + clarity*0.3 + speed*0.2 + access*0.2'
+  };
 
-  if (data.totalDeadClicks > 0) {
-    const topDead = data.deadClicks[0];
-    painPoints.push({
-      title: `Dead clicks found (${data.totalDeadClicks} instances)`,
-      description: `${data.totalDeadClicks} click(s) on elements that produced no visible response. This suggests misleading UI elements that look clickable but aren't.`,
-      severity: data.totalDeadClicks >= 5 ? 'high' : 'medium',
-      evidence: topDead ? `Element "${topDead.text || topDead.selector}" (${topDead.role}) on ${shortenUrl(topDead.url)} did not respond to click` : 'Multiple non-responsive elements found'
-    });
-  }
+  // Build friction table from signals array
+  const frictionTable = buildFrictionTable(signals, pages);
 
-  if (avgTimePerPage > 30) {
-    painPoints.push({
-      title: 'High average dwell time per page',
-      description: `Users spent an average of ${avgTimePerPage}s per page, which may indicate difficulty finding information or confusing layout.`,
-      severity: 'medium',
-      evidence: `Average time per page: ${avgTimePerPage}s across ${data.totalPages} pages`
-    });
-  }
+  // Build journey table
+  const journeyTable = buildJourneyTable(pages, navigations);
 
-  if (data.totalPages <= 1) {
-    painPoints.push({
-      title: 'Single page session',
-      description: 'The user only visited one page, which could indicate poor discoverability of other content or features.',
-      severity: 'low',
-      evidence: `Only ${data.totalPages} page(s) visited in ${duration}s session`
-    });
-  }
-
-  // Analyze URL-level metrics for additional pain points
-  if (data.urlMetrics && typeof data.urlMetrics === 'object') {
-    Object.entries(data.urlMetrics).forEach(([urlPath, metrics]) => {
-      // Check for repeated visits (navigation confusion)
-      if (metrics.visitCount >= 3) {
-        painPoints.push({
-          title: `Users repeatedly returned to ${shortenUrl(urlPath)}`,
-          description: `The page "${metrics.title || shortenUrl(urlPath)}" was visited ${metrics.visitCount} times, suggesting users may be confused about navigation or content location.`,
-          severity: 'medium',
-          evidence: `Page visited ${metrics.visitCount} times with total engagement time: ${metrics.totalTimeSpent ? Math.round(metrics.totalTimeSpent / 1000) : 0}s`
-        });
-      }
-
-      // Check for low scroll depth
-      if (metrics.maxScrollDepth !== undefined && metrics.maxScrollDepth < 20 && metrics.visitCount > 0) {
-        painPoints.push({
-          title: `Low scroll engagement on ${shortenUrl(urlPath)}`,
-          description: `Users rarely scrolled past the fold on "${metrics.title || shortenUrl(urlPath)}" (${metrics.maxScrollDepth}% max depth), indicating the content may not be compelling or discoverable.`,
-          severity: 'medium',
-          evidence: `Max scroll depth: ${metrics.maxScrollDepth}%, ${metrics.visitCount} visit(s)`
-        });
-      }
-
-      // Check for dead end pages (no interactions)
-      if (metrics.clickCount === 0 && metrics.visitCount > 0) {
-        painPoints.push({
-          title: `Dead end page: ${shortenUrl(urlPath)}`,
-          description: `"${metrics.title || shortenUrl(urlPath)}" received no clicks during ${metrics.visitCount} visit(s), suggesting it may be a content dead end with no clear next action.`,
-          severity: 'low',
-          evidence: `${metrics.visitCount} visit(s) with 0 interactions`
-        });
-      }
-
-      // Check for high dead click rates on specific URLs
-      if (metrics.deadClickCount > 0) {
-        painPoints.push({
-          title: `High dead click rate on ${shortenUrl(urlPath)}`,
-          description: `${metrics.deadClickCount} non-responsive click(s) detected on "${metrics.title || shortenUrl(urlPath)}", indicating misleading UI elements.`,
-          severity: 'medium',
-          evidence: `${metrics.deadClickCount} dead click(s) out of ${metrics.clickCount} total clicks`
-        });
-      }
-    });
-  }
-
-  if (painPoints.length === 0) {
-    painPoints.push({
-      title: 'No major issues detected',
-      description: 'The user journey was relatively smooth with no rage clicks or excessive dead clicks.',
-      severity: 'low',
-      evidence: `${data.totalClicks} clicks across ${data.totalPages} pages with ${data.totalRageClicks} rage clicks`
-    });
-  }
-
-  // Build suggestions
-  const suggestions = [];
-
-  if (data.totalDeadClicks > 0) {
-    // Find URLs with high dead click counts for specific recommendations
-    let deadClickUrls = [];
-    if (data.urlMetrics && typeof data.urlMetrics === 'object') {
-      deadClickUrls = Object.entries(data.urlMetrics)
-        .filter(([_, m]) => m.deadClickCount > 0)
-        .map(([url, m]) => `${shortenUrl(url)} (${m.deadClickCount} dead clicks)`);
-    }
-    const urlReference = deadClickUrls.length > 0 ? ` especially on ${deadClickUrls.slice(0, 2).join(', ')}` : '';
-    suggestions.push({
-      title: 'Fix non-responsive clickable elements',
-      description: `Review the ${data.totalDeadClicks} dead click elements${urlReference} and either make them interactive or change their visual style to not appear clickable.`,
-      impact: 'high',
-      effort: 'low'
-    });
-  }
-
-  if (data.totalRageClicks > 0) {
-    suggestions.push({
-      title: 'Improve click feedback on interactive elements',
-      description: 'Add visual feedback (loading states, hover effects, click animations) to elements where rage clicks occurred.',
-      impact: 'high',
-      effort: 'low'
-    });
-  }
-
-  // URL-based suggestions
-  if (data.urlMetrics && typeof data.urlMetrics === 'object') {
-    const repeatedVisitUrls = Object.entries(data.urlMetrics)
-      .filter(([_, m]) => m.visitCount >= 3)
-      .map(([url, _]) => shortenUrl(url));
-
-    if (repeatedVisitUrls.length > 0) {
-      suggestions.push({
-        title: 'Improve navigation to reduce repeated page visits',
-        description: `Users revisited ${repeatedVisitUrls.slice(0, 2).join(' and ')} multiple times. Review site navigation, add clearer links, or improve search to help users find content faster.`,
-        impact: 'medium',
-        effort: 'medium'
-      });
-    }
-  }
-
-  suggestions.push({
-    title: 'Add breadcrumb navigation',
-    description: `With ${data.totalPages} pages in the journey, clear breadcrumb navigation would help users understand where they are in the flow.`,
-    impact: 'medium',
-    effort: 'medium'
-  });
-
-  suggestions.push({
-    title: 'Reduce page load friction',
-    description: 'Consider lazy loading, skeleton screens, and optimistic UI updates to make the experience feel faster.',
-    impact: 'medium',
-    effort: 'medium'
-  });
-
-  // Build mermaid diagram
-  const mermaidDiagram = generateFallbackMermaid(data);
+  // Build metrics table
+  const metricsTable = buildMetricsTable(metrics, pages, avgTimePerPage, avgTTFA);
 
   // Build summary
-  const summary = `Analysis of ${hostname}: User visited ${data.totalPages} page(s) over ${duration} seconds, making ${data.totalClicks} clicks. ${data.totalRageClicks > 0 ? `Detected ${data.totalRageClicks} rage click(s) indicating frustration. ` : ''}${data.totalDeadClicks > 0 ? `Found ${data.totalDeadClicks} dead click(s) on non-responsive elements. ` : ''}Overall UX score: ${overallScore}/10.`;
+  const summary = buildSummary(hostname, uniquePages, duration, totalClicks, rageClickCount, deadClickCount, overallScore, backNavigationCount, {
+    navigation: navigationScore,
+    clarity: clarityScore,
+    speedFeel: speedFeelScore,
+    accessibility: accessibilityScore
+  });
+
+  // Methodology
+  const methodology = {
+    urlNormalization: 'URLs are normalized by stripping tracking parameters (utm_*, fbclid, gclid) while preserving state-bearing query params. Two URLs that differ only in tracking params are treated as the same page.',
+    pageVsStep: 'A PAGE transition occurs when the URL pathname changes (e.g., /jobs/ → /jobs/collections/recommended/). A STEP transition occurs when the pathname stays the same but the query parameters change (e.g., ?currentJobId=123 → ?currentJobId=456). Steps represent state changes within the same view — like browsing through a list of items. Pages represent moving to a different section of the site.',
+    frictionRules: 'Rage Click: 3+ rapid clicks on the same element within 1 second. Dead Click: Click with no DOM mutation or navigation within 500ms. Hover Hesitation: Hovering over an interactive element for 2+ seconds without clicking. Idle Cluster: No user interaction for 15+ seconds. Back Navigation: User navigated back to a previously visited URL.',
+    scoringFormulas: {
+      navigation: 'base 100: -10 per back nav (max 30), -5 per rage click for first 3 then -2 each (max 30), -5 if single page',
+      clarity: 'base 100: -12 per dead click, -8 per hover hesitation, -5 if avg TTFA > 8s',
+      speedFeel: 'base 100: -3 per second over 15s avg time/page, -10 per idle cluster',
+      accessibility: 'base 100: -5 per page with < 25% scroll depth, -3 per page with TTFA > 8s'
+    }
+  };
 
   return {
     summary,
-    mermaidDiagram,
-    painPoints,
-    suggestions,
+    journeyTable,
+    frictionTable,
     scores: {
       navigation: navigationScore,
       clarity: clarityScore,
-      speedFeel: speedScore,
+      speedFeel: speedFeelScore,
       accessibility: accessibilityScore,
       overall: overallScore
-    }
+    },
+    metricsTable,
+    methodology
   };
 }
 
 /**
- * Build analysis prompt from tracking data
+ * Calculate navigation score (0-100)
+ * Base: 100, penalties: -15 per back nav, -10 per rage click, -5 if only 1 page
+ * Returns { base, penalties, final, formula }
  */
-function buildAnalysisPrompt(data) {
+function calculateNavigationScore(backNavCount, rageClickCount, totalPages) {
+  let score = 100;
+  const penalties = [];
+  if (backNavCount > 0) {
+    // Cap at -30 max for back nav
+    const penalty = Math.min(backNavCount * 10, 30);
+    penalties.push({ reason: `${backNavCount} back navigation(s)`, amount: penalty });
+    score -= penalty;
+  }
+  if (rageClickCount > 0) {
+    // Diminishing: first 3 rage clicks are -5 each, after that -2 each, cap at -30
+    const basePenalty = Math.min(rageClickCount, 3) * 5;
+    const extraPenalty = Math.max(0, rageClickCount - 3) * 2;
+    const penalty = Math.min(basePenalty + extraPenalty, 30);
+    penalties.push({ reason: `${rageClickCount} rage click(s)`, amount: penalty });
+    score -= penalty;
+  }
+  if (totalPages <= 1) {
+    penalties.push({ reason: 'Single page session', amount: 5 });
+    score -= 5;
+  }
+  return {
+    base: 100,
+    penalties,
+    final: Math.max(0, score),
+    formula: '100 - backnavs(10ea, max 30) - rage(5ea first 3, 2ea after, max 30) - 1page(5)'
+  };
+}
+
+/**
+ * Calculate clarity score (0-100)
+ * Base: 100, penalties: -12 per dead click, -8 per hover hesitation, -5 per high TTFA page
+ * Returns { base, penalties, final, formula }
+ */
+function calculateClarityScore(deadClickCount, hoverHesitationCount, avgTTFA) {
+  let score = 100;
+  const penalties = [];
+  if (deadClickCount > 0) {
+    const penalty = deadClickCount * 12;
+    penalties.push({ reason: `${deadClickCount} dead click(s)`, amount: penalty });
+    score -= penalty;
+  }
+  if (hoverHesitationCount > 0) {
+    const penalty = hoverHesitationCount * 8;
+    penalties.push({ reason: `${hoverHesitationCount} hover hesitation(s)`, amount: penalty });
+    score -= penalty;
+  }
+  if (avgTTFA > 8) {
+    penalties.push({ reason: 'High avg TTFA (>8s)', amount: 5 });
+    score -= 5;
+  }
+  return {
+    base: 100,
+    penalties,
+    final: Math.max(0, score),
+    formula: '100 - (dead*12) - (hover*8) - (ttfa>8s*5)'
+  };
+}
+
+/**
+ * Calculate speed/feel score (0-100)
+ * Base: 100, penalties: -3 per second over 15s avg, -10 per idle cluster
+ * Returns { base, penalties, final, formula }
+ */
+function calculateSpeedFeel(avgTimePerPage, idleClusterCount) {
+  let score = 100;
+  const penalties = [];
+  if (avgTimePerPage > 15) {
+    const excessSeconds = avgTimePerPage - 15;
+    const penalty = excessSeconds * 3;
+    penalties.push({ reason: `Avg time ${avgTimePerPage}s (${excessSeconds}s over 15s)`, amount: penalty });
+    score -= penalty;
+  }
+  if (idleClusterCount > 0) {
+    const penalty = idleClusterCount * 10;
+    penalties.push({ reason: `${idleClusterCount} idle cluster(s)`, amount: penalty });
+    score -= penalty;
+  }
+  return {
+    base: 100,
+    penalties,
+    final: Math.max(0, score),
+    formula: '100 - (sec>15s*3) - (idle*10)'
+  };
+}
+
+/**
+ * Calculate accessibility score (0-100)
+ * Base: 100, penalties: -5 per page < 25% scroll, -3 per page TTFA > 8s
+ * Returns { base, penalties, final, formula }
+ */
+function calculateAccessibility(pages) {
+  let score = 100;
+  const penalties = [];
+  const lowScrollPages = pages.filter(p => (p.maxScrollDepth || 0) < 25).length;
+  const highTTFAPages = pages.filter(p => (p.ttfa || 0) > 8000).length;
+  if (lowScrollPages > 0) {
+    const penalty = lowScrollPages * 5;
+    penalties.push({ reason: `${lowScrollPages} page(s) <25% scroll`, amount: penalty });
+    score -= penalty;
+  }
+  if (highTTFAPages > 0) {
+    const penalty = highTTFAPages * 3;
+    penalties.push({ reason: `${highTTFAPages} page(s) TTFA >8s`, amount: penalty });
+    score -= penalty;
+  }
+  return {
+    base: 100,
+    penalties,
+    final: Math.max(0, score),
+    formula: '100 - (scroll<25%*5) - (ttfa>8s*3)'
+  };
+}
+
+/**
+ * Truncate long query strings to keep UI readable
+ */
+function truncateQuery(query) {
+  if (!query || query.length <= 60) return query;
+  // Show first meaningful param and count of others
+  var params = query.split('&');
+  if (params.length <= 1) return query.substring(0, 57) + '...';
+  var first = params[0];
+  if (first.length > 40) first = first.substring(0, 37) + '...';
+  return first + ' (+' + (params.length - 1) + ' more)';
+}
+
+/**
+ * Build journey table from pages and navigations
+ */
+function buildJourneyTable(pages, navigations) {
+  return pages.map((page, index) => {
+    // Match navigation by normalized URL (pathname + queryState)
+    const pageUrl = page.queryState ? page.pathname + '?' + page.queryState : page.pathname;
+    const nav = navigations.find(n => n.to === pageUrl || n.to === page.pathname);
+
+    // Determine change type
+    let changeType;
+    if (index === 0) {
+      changeType = 'PAGE_CHANGE'; // First page is always a PAGE, not a step
+    } else if (nav) {
+      changeType = nav.changeType;
+    } else {
+      // Fallback: compare pathnames with previous page
+      const prevPage = pages[index - 1];
+      changeType = (prevPage && prevPage.pathname === page.pathname) ? 'STEP_CHANGE' : 'PAGE_CHANGE';
+    }
+
+    // Build key action from click actions (CTA names) and friction signals
+    const keyActions = [];
+
+    // Add friction signals first (most important)
+    if (page.frictionSignals && page.frictionSignals.length > 0) {
+      page.frictionSignals.forEach(sig => {
+        if (sig.signalType === 'rage_click') keyActions.push('Rage click on ' + formatEvidence(sig.evidence));
+        else if (sig.signalType === 'dead_click') keyActions.push('Dead click on ' + formatEvidence(sig.evidence));
+        else if (sig.signalType === 'back_navigation') keyActions.push('Back navigation');
+        else if (sig.signalType === 'hover_hesitation') keyActions.push('Hover hesitation on ' + formatEvidence(sig.evidence));
+        else if (sig.signalType === 'idle_cluster') keyActions.push('Idle (' + (sig.evidence && sig.evidence.idleDuration ? Math.round(sig.evidence.idleDuration / 1000) + 's' : '15s+') + ')');
+        else if (sig.signalType === 'high_ttfa') keyActions.push('Slow first action');
+      });
+    }
+
+    // If no friction, show what user clicked (CTA names)
+    if (keyActions.length === 0 && page.clickActions && page.clickActions.length > 0) {
+      var meaningfulClicks = page.clickActions
+        .filter(c => c.text || c.ariaLabel)
+        .slice(0, 3); // Show up to 3 click actions
+
+      if (meaningfulClicks.length > 0) {
+        meaningfulClicks.forEach(c => {
+          const label = c.text || c.ariaLabel || '';
+          const truncated = label.length > 40 ? label.substring(0, 37) + '...' : label;
+          const elType = c.elementType === 'link' ? 'Clicked link' :
+                         c.elementType === 'button' ? 'Clicked button' :
+                         'Clicked';
+          keyActions.push(elType + ': "' + truncated + '"');
+        });
+      }
+    }
+
+    // Fallback: show click count if > 0
+    if (keyActions.length === 0 && (page.clickCount || 0) > 0) {
+      keyActions.push(page.clickCount + ' click(s)');
+    }
+    // Last resort: show "Browsed"
+    if (keyActions.length === 0) keyActions.push('Browsed');
+
+    // Determine referrer
+    var referrer = 'Direct';
+    if (nav && nav.from) {
+      referrer = nav.from;
+    } else if (index > 0) {
+      referrer = pages[index - 1].pathname || '/';
+    }
+
+    return {
+      stepNumber: index + 1,
+      pathname: page.pathname,
+      queryState: truncateQuery(page.queryState || ''),
+      changeType: changeType,
+      timeSpent: page.timeSpent ? Math.round(page.timeSpent / 1000) : 0,
+      scrollDepth: page.maxScrollDepth || 0,
+      hasScrolled: page.hasScrolled || false,
+      ttfa: page.ttfa ? Math.round(page.ttfa / 1000) : null,
+      clickCount: page.clickCount || 0,
+      keyAction: keyActions[0],
+      allActions: keyActions,
+      referrer: referrer,
+      queryDisplay: (changeType === 'STEP_CHANGE' && page.queryState) ? '?' + page.queryState : ''
+    };
+  });
+}
+
+/**
+ * Build friction table from signals array
+ */
+function buildFrictionTable(signals, pages) {
+  return signals.map(signal => {
+    const page = pages.find(p => p.pageId === signal.pageRef);
+    const severity = signal.severity || 'medium';
+
+    let issue = signal.signalType;
+    if (signal.signalType === 'rage_click') issue = 'Rage Click';
+    if (signal.signalType === 'dead_click') issue = 'Dead Click';
+    if (signal.signalType === 'hover_hesitation') issue = 'Hover Hesitation';
+    if (signal.signalType === 'idle_cluster') issue = 'Idle Period';
+    if (signal.signalType === 'back_navigation') issue = 'Back Navigation';
+    if (signal.signalType === 'high_ttfa') issue = 'Slow First Action';
+
+    // Convert evidence object to readable string
+    const evidenceStr = formatEvidence(signal.evidence);
+
+    return {
+      issue,
+      page: page ? page.pathname : 'Unknown',
+      evidence: evidenceStr,
+      severity
+    };
+  });
+}
+
+/**
+ * Convert evidence object to a human-readable string
+ * NEVER shows evidence.selector (internal technical detail)
+ */
+function formatEvidence(evidence) {
+  if (!evidence) return 'Detected by rule';
+  if (typeof evidence === 'string') return evidence;
+  if (typeof evidence !== 'object') return String(evidence);
+
+  var parts = [];
+  // Human-readable element description (priority)
+  if (evidence.elementDescription) parts.push(evidence.elementDescription);
+  // Numeric context
+  if (evidence.clickCount) parts.push(evidence.clickCount + ' clicks');
+  if (evidence.hoverDuration) parts.push(Math.round(evidence.hoverDuration / 1000) + 's hover');
+  if (evidence.idleDuration) parts.push(Math.round(evidence.idleDuration / 1000) + 's idle');
+  if (evidence.ttfa) parts.push('TTFA: ' + Math.round(evidence.ttfa / 1000) + 's');
+  if (evidence.fromUrl) parts.push('from ' + evidence.fromUrl);
+  if (evidence.toUrl) parts.push('to ' + evidence.toUrl);
+  // NEVER show evidence.selector — it's internal technical detail
+  return parts.length > 0 ? parts.join(', ') : 'Detected by rule';
+}
+
+/**
+ * Build metrics table
+ */
+function buildMetricsTable(metrics, pages, avgTimePerPage, avgTTFA) {
+  return [
+    { metric: 'Unique Pages', value: metrics.uniquePages || metrics.totalPages || pages.length, howMeasured: 'Distinct URL pathnames visited' },
+    { metric: 'Total Navigations', value: metrics.totalPages || pages.length, howMeasured: 'All page/step transitions including revisits' },
+    { metric: 'Total Steps', value: metrics.totalSteps || 0, howMeasured: 'Navigation transitions between pages' },
+    { metric: 'Total Clicks', value: metrics.totalClicks || 0, howMeasured: 'All recorded click events' },
+    { metric: 'Rage Clicks', value: metrics.rageClickCount || 0, howMeasured: '3+ rapid clicks on same element within 1s' },
+    { metric: 'Dead Clicks', value: metrics.deadClickCount || 0, howMeasured: 'Clicks with no visible response' },
+    { metric: 'Back Navigations', value: metrics.backNavigationCount || 0, howMeasured: 'User pressed back button' },
+    { metric: 'Hover Hesitations', value: metrics.hoverHesitationCount || 0, howMeasured: 'Long hover without click' },
+    { metric: 'Idle Clusters', value: metrics.idleClusterCount || 0, howMeasured: '30s+ inactivity periods' },
+    { metric: 'Avg Time per Page', value: `${avgTimePerPage}s`, howMeasured: 'Mean session time / number of pages' },
+    { metric: 'Avg TTFA', value: `${avgTTFA}s`, howMeasured: 'Mean time to first action across pages' },
+    { metric: 'Stripped Tracking Params', value: metrics.totalStrippedParams || 0, howMeasured: 'UTM and utm-like query params removed' }
+  ];
+}
+
+/**
+ * Build summary text
+ */
+function buildSummary(hostname, totalPages, duration, totalClicks, rageClickCount, deadClickCount, overallScore, backNavCount, scores) {
+  const finalScore = typeof overallScore === 'object' ? overallScore.final : overallScore;
+  const displayScore = Math.round(finalScore / 10);
+
+  // BCG-style bullet points as array
+  const bullets = [];
+
+  // Headline
+  bullets.push(`Analyzed ${hostname} across ${totalPages} page(s) over ${duration}s with ${totalClicks} interactions. Overall UX score: ${displayScore}/10.`);
+
+  // Navigation insight
+  if (scores && scores.navigation) {
+    const navDisplay = Math.round((typeof scores.navigation === 'object' ? scores.navigation.final : scores.navigation) / 10);
+    if (navDisplay <= 5) {
+      bullets.push(`Navigation friction is high (${navDisplay}/10)${backNavCount > 0 ? ' — ' + backNavCount + ' back navigation(s) suggest users are losing their way' : ''}.`);
+    } else {
+      bullets.push(`Navigation flow is ${navDisplay >= 8 ? 'smooth' : 'adequate'} (${navDisplay}/10) with ${totalPages} pages visited sequentially.`);
+    }
+  }
+
+  // Friction signals
+  if (rageClickCount > 0 || deadClickCount > 0) {
+    let frictionNote = 'Friction detected: ';
+    const parts = [];
+    if (rageClickCount > 0) parts.push(`${rageClickCount} rage click(s) indicating unresponsive or confusing elements`);
+    if (deadClickCount > 0) parts.push(`${deadClickCount} dead click(s) on non-interactive elements`);
+    frictionNote += parts.join('; ') + '.';
+    bullets.push(frictionNote);
+  }
+
+  // (Scroll depth removed — not reliable on SPAs)
+
+  return bullets;
+}
+
+/**
+ * Build AI analysis prompt from session data
+ * Instructs Claude to ONLY reference recorded data, cite exact numbers, say "Insufficient evidence" if unsupported
+ */
+function buildAIAnalysisPrompt(sessionData) {
+  const { session, pages = [], signals = [], navigations = [], metrics = {} } = sessionData;
+  const duration = Math.round((session.endTime - session.startTime) / 1000);
+
   // Build page journey summary
-  const pagesSummary = data.pages.map((p, i) => {
+  const pagesSummary = pages.map((p, i) => {
     const timeSpent = p.timeSpent ? `${Math.round(p.timeSpent / 1000)}s` : 'unknown';
-    return `  ${i + 1}. ${p.title || p.url} (${timeSpent}, ${p.clickCount || 0} clicks, scroll: ${p.scrollDepth || 0}%)`;
+    const scrollDepth = p.maxScrollDepth || 0;
+    const ttfa = p.ttfa ? `${Math.round(p.ttfa / 1000)}s` : 'unknown';
+    return `  ${i + 1}. ${p.pathname} (${timeSpent}, ${p.clickCount || 0} clicks, scroll: ${scrollDepth}%, TTFA: ${ttfa})`;
   }).join('\n');
 
-  // Build rage click summary
-  const rageSummary = data.rageClicks.map(r =>
-    `  - "${r.text || r.selector}" (${r.role}) on ${r.url} — ${r.clickCount} rapid clicks`
-  ).join('\n') || '  None detected';
+  // Build signal summary (from signals array)
+  const rageSummary = signals
+    .filter(s => s.signalType === 'rage_click')
+    .map(s => `  - ${s.evidence || 'Rage click detected'}`)
+    .join('\n') || '  None detected';
 
-  // Build dead click summary
-  const deadSummary = data.deadClicks.map(d =>
-    `  - "${d.text || d.selector}" (${d.role}) on ${d.url}`
-  ).join('\n') || '  None detected';
+  const deadSummary = signals
+    .filter(s => s.signalType === 'dead_click')
+    .map(s => `  - ${s.evidence || 'Dead click detected'}`)
+    .join('\n') || '  None detected';
+
+  const hoverHesitationSummary = signals
+    .filter(s => s.signalType === 'hover_hesitation')
+    .map(s => `  - ${s.evidence || 'Hover hesitation detected'}`)
+    .join('\n') || '  None detected';
+
+  const idleClusterSummary = signals
+    .filter(s => s.signalType === 'idle_cluster')
+    .map(s => `  - ${s.evidence || 'Idle cluster detected'}`)
+    .join('\n') || '  None detected';
 
   // Build navigation flow
-  const navFlow = data.navigations.map(n => {
-    const from = shortenUrl(n.from);
-    const to = shortenUrl(n.to);
-    return `  ${from} → ${to}`;
+  const navFlow = navigations.map((n, i) => {
+    const changeType = n.changeType || 'TRANSITION';
+    return `  ${i + 1}. ${n.fromNormalized || n.from} → ${n.toNormalized || n.to} (${changeType})`;
   }).join('\n') || '  Single page session';
 
-  return `You are FlowLens AI, a senior product manager analyzing real user journey data captured from a website browsing session.
+  return `You are FlowLens AI, analyzing REAL user session data. CRITICAL RULES:
+- ONLY reference data present in this report
+- Cite EXACT numbers from the metrics below
+- If data doesn't support a claim, respond "Insufficient evidence"
+- Output JSON only, no markdown
 
-WEBSITE ANALYZED: ${data.hostname || 'Unknown'}
-SESSION DURATION: ${data.startTime ? Math.round((data.endTime - parseInt(data.startTime)) / 1000) : 'unknown'} seconds
+WEBSITE: ${session.hostname}
+SESSION DURATION: ${duration} seconds
+RECORDING WINDOW: ${new Date(session.startTime).toISOString()} to ${new Date(session.endTime).toISOString()}
 
-SUMMARY STATS:
-- Total clicks: ${data.totalClicks}
-- Pages visited: ${data.totalPages}
-- Rage clicks (frustration signals): ${data.totalRageClicks}
-- Dead clicks (clicks on non-responsive elements): ${data.totalDeadClicks}
-- Page navigations: ${data.totalNavigations}
+EXACT METRICS:
+- Total Pages: ${metrics.totalPages || pages.length}
+- Total Clicks: ${metrics.totalClicks || 0}
+- Rage Clicks: ${metrics.rageClickCount || 0}
+- Dead Clicks: ${metrics.deadClickCount || 0}
+- Back Navigations: ${metrics.backNavigationCount || 0}
+- Hover Hesitations: ${metrics.hoverHesitationCount || 0}
+- Idle Clusters: ${metrics.idleClusterCount || 0}
+- Avg Time/Page: ${pages.length > 0 ? Math.round(pages.reduce((sum, p) => sum + (p.timeSpent || 0), 0) / pages.length / 1000) : 0}s
+- Avg TTFA: ${pages.length > 0 ? Math.round(pages.reduce((sum, p) => sum + (p.ttfa || 0), 0) / pages.length / 1000) : 0}s
+- Avg Scroll Depth: ${pages.length > 0 ? Math.round(pages.reduce((sum, p) => sum + (p.maxScrollDepth || 0), 0) / pages.length) : 0}%
 
 PAGES VISITED (in order):
-${pagesSummary || '  No page data captured'}
+${pagesSummary}
 
 NAVIGATION FLOW:
 ${navFlow}
 
-RAGE CLICKS (user frustration — 3+ rapid clicks on same element):
+FRICTION SIGNALS:
+Rage Clicks (3+ rapid clicks on same element):
 ${rageSummary}
 
-DEAD CLICKS (clicks that triggered no response):
+Dead Clicks (non-responsive elements):
 ${deadSummary}
 
-TOP CLICKED ELEMENTS:
-${getTopClickedElements(data.clicks)}
+Hover Hesitations (long hover without click):
+${hoverHesitationSummary}
 
-Please generate a detailed product teardown analysis. Return ONLY valid JSON (no markdown wrapping) in this exact format:
+Idle Clusters (30s+ inactivity):
+${idleClusterSummary}
+
+Return ONLY this JSON structure (no markdown):
 {
-  "summary": "2-3 sentence executive summary of the user experience on this website",
-  "mermaidDiagram": "flowchart TD\\n  A[Page 1] --> B[Page 2]\\n  B --> C[Page 3]",
-  "painPoints": [
-    {
-      "title": "Short pain point title",
-      "description": "Detailed description of the issue",
-      "severity": "high",
-      "evidence": "Data-backed evidence from the tracking data"
-    }
+  "summary": "2-3 sentence summary of UX based on actual data above",
+  "journeyTable": [
+    {"stepNumber": 1, "pathname": "/path", "queryState": "state", "changeType": "PAGE_CHANGE|STEP_CHANGE", "timeSpent": 10, "keySignals": "friction signals or 'No friction'"},
+    ...
   ],
-  "suggestions": [
-    {
-      "title": "Short suggestion title",
-      "description": "Specific, actionable UX improvement",
-      "impact": "high",
-      "effort": "low"
-    }
+  "frictionTable": [
+    {"issue": "Issue type", "page": "/pathname", "evidence": "exact data from metrics", "detectionRule": "rule name", "severity": "high|medium|low"},
+    ...
   ],
   "scores": {
-    "navigation": 7,
-    "clarity": 6,
-    "speedFeel": 8,
-    "accessibility": 5,
-    "overall": 7
+    "navigation": {"base": 100, "penalties": ["penalty description"], "final": X, "formula": "100 - (backnavs*15) - (rage*10) - (1page*5)"},
+    "clarity": {"base": 100, "penalties": ["penalty"], "final": X, "formula": "100 - (dead*12) - (hover*8) - (ttfa>8s*5)"},
+    "speedFeel": {"base": 100, "penalties": ["penalty"], "final": X, "formula": "100 - (sec>15s*3) - (idle*10)"},
+    "accessibility": {"base": 100, "penalties": ["penalty"], "final": X, "formula": "100 - (scroll<25%*5) - (ttfa>8s*3)"},
+    "overall": {"base": 100, "penalties": [], "final": X, "formula": "nav*0.3 + clarity*0.3 + speed*0.2 + access*0.2"}
+  },
+  "metricsTable": [
+    {"metric": "name", "value": "value", "howMeasured": "method"},
+    ...
+  ],
+  "methodology": {
+    "urlNormalization": "pathname + queryState",
+    "pageVsStep": "pages are URLs; steps are transitions",
+    "frictionRules": "based on recorded signals",
+    "scoringFormulas": {"navigation": "...", "clarity": "...", ...}
   }
-}
-
-IMPORTANT:
-- Base scores on actual data (rage clicks = lower navigation score, dead clicks = lower clarity score)
-- The mermaid diagram should show the actual page flow with proper Mermaid flowchart TD syntax
-- Include at least 2-3 pain points and 2-3 suggestions
-- If no rage/dead clicks were found, note that positively but still suggest improvements based on the flow`;
+}`;
 }
 
 /**
- * Get top clicked elements summary
+ * Utilities
  */
-function getTopClickedElements(clicks) {
-  const elementCounts = {};
-  clicks.forEach(c => {
-    const key = `${c.role}: "${c.text || c.selector}"`;
-    elementCounts[key] = (elementCounts[key] || 0) + 1;
-  });
-
-  return Object.entries(elementCounts)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10)
-    .map(([el, count]) => `  - ${el} (${count} clicks)`)
-    .join('\n') || '  No click data';
-}
 
 /**
- * Shorten URL for display
- */
-function shortenUrl(url) {
-  try {
-    const u = new URL(url);
-    return u.pathname === '/' ? u.hostname : u.pathname;
-  } catch {
-    return url;
-  }
-}
-
-/**
- * Generate fallback mermaid diagram from navigation data
- */
-function generateFallbackMermaid(data) {
-  if (data.pages.length === 0) return 'flowchart TD\n  A[No pages recorded]';
-
-  // Try to use navigations with urlPath data if available
-  let nodePath = [];
-  if (data.navigations && data.navigations.length > 0) {
-    // Use navigation flow with urlPath if available
-    nodePath.push(data.navigations[0].from || data.pages[0]?.url);
-    data.navigations.forEach(nav => {
-      if (!nodePath.includes(nav.to)) {
-        nodePath.push(nav.to);
-      }
-    });
-  } else {
-    // Fall back to pages array
-    nodePath = data.pages.map(p => p.url);
-  }
-
-  const nodes = nodePath.map((url, i) => {
-    const pageData = data.pages.find(p => p.url === url);
-    const label = pageData?.title || shortenUrl(url) || `Page ${i + 1}`;
-    return { id: String.fromCharCode(65 + i), label: label.substring(0, 30), url };
-  });
-
-  let diagram = 'flowchart TD\n';
-  nodes.forEach((node, i) => {
-    diagram += `  ${node.id}["${node.label}"]\n`;
-    if (i > 0) {
-      diagram += `  ${nodes[i - 1].id} --> ${node.id}\n`;
-    }
-  });
-  return diagram;
-}
-
-/**
- * Call Claude API
+ * Call Claude API with session data
+ * Model: claude-haiku-4-5-20251001, max_tokens: 3000
+ * Handles 401, 403, 429, and credit errors with helpful messages
  */
 async function callClaudeAPI(apiKey, userPrompt) {
   const response = await fetch(API_ENDPOINT, {
@@ -609,7 +749,7 @@ async function callClaudeAPI(apiKey, userPrompt) {
     },
     body: JSON.stringify({
       model: MODEL,
-      max_tokens: 2048,
+      max_tokens: 3000,
       messages: [
         {
           role: 'user',
@@ -629,11 +769,11 @@ async function callClaudeAPI(apiKey, userPrompt) {
       if (response.status === 401) {
         errorMessage = 'Invalid API key. Please check your key in Settings (⚙️).';
       } else if (response.status === 403) {
-        errorMessage = 'API access denied. Your API key may not have permission for this model.';
+        errorMessage = 'API access denied. Your API key may not have permission for Claude Haiku.';
       } else if (response.status === 429) {
         errorMessage = 'Rate limit reached. Please wait a minute and try again.';
       } else if (errorMessage.includes('credit') || errorMessage.includes('billing')) {
-        errorMessage = 'Insufficient credits. Please add credits at console.anthropic.com/settings/billing';
+        errorMessage = 'Insufficient credits. Please add credits at console.anthropic.com/settings/billing.';
       }
     } catch (e) {
       // Could not parse error response
@@ -691,12 +831,16 @@ async function handleExportReport(reportId) {
   return { success: true, message: 'Report exported', filename };
 }
 
-// ── Utilities ──
-
+/**
+ * Generate unique report ID
+ */
 function generateReportId() {
   return `report_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 }
 
+/**
+ * Safe JSON parse with fallback
+ */
 function safeParseJSON(str, fallback) {
   if (!str) return fallback;
   if (typeof str === 'object') return str; // Already parsed
@@ -704,14 +848,5 @@ function safeParseJSON(str, fallback) {
     return JSON.parse(str);
   } catch {
     return fallback;
-  }
-}
-
-function getHostnameFromPages(pages) {
-  if (pages.length === 0) return 'unknown';
-  try {
-    return new URL(pages[0].url).hostname;
-  } catch {
-    return 'unknown';
   }
 }

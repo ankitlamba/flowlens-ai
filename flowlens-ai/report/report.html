@@ -3,142 +3,136 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FlowLens AI - Report</title>
+    <title>FlowLens AI - UX Teardown Report</title>
     <link rel="stylesheet" href="report.css">
 </head>
 <body>
-    <div class="container">
-
+    <div class="report-container">
         <!-- Header -->
-        <header class="header">
+        <header class="report-header">
             <div class="header-top">
-                <span class="logo">FlowLens AI</span>
-                <span class="mode-badge" id="mode-badge">OFFLINE</span>
+                <div class="brand">FlowLens AI</div>
+                <div class="report-badge">UX Teardown Report</div>
             </div>
-            <h1>Product Teardown Report</h1>
-            <div class="header-meta">
-                <span id="hostname">—</span>
-                <span id="date">—</span>
-            </div>
+            <h1 class="site-title" id="site-title">Loading...</h1>
+            <div class="header-meta" id="header-meta"></div>
         </header>
 
-        <!-- Scores -->
-        <h2>UX Scores</h2>
-        <div class="scores-row">
-            <div class="score-item" id="score-navigation">
-                <div class="score-number" id="score-navigation-value">-</div>
-                <div class="score-name">Navigation</div>
+        <!-- UX Scores -->
+        <section class="section scores-section">
+            <h2 class="section-title">UX Performance Scores</h2>
+            <div class="scores-grid">
+                <div class="score-card" id="score-card-overall">
+                    <div class="score-number" id="score-overall-value">-</div>
+                    <div class="score-label">Overall</div>
+                    <span class="score-help" data-tooltip="" id="tip-overall">?</span>
+                </div>
+                <div class="score-card" id="score-card-navigation">
+                    <div class="score-number" id="score-navigation-value">-</div>
+                    <div class="score-label">Navigation</div>
+                    <span class="score-help" data-tooltip="" id="tip-navigation">?</span>
+                </div>
+                <div class="score-card" id="score-card-clarity">
+                    <div class="score-number" id="score-clarity-value">-</div>
+                    <div class="score-label">Clarity</div>
+                    <span class="score-help" data-tooltip="" id="tip-clarity">?</span>
+                </div>
+                <div class="score-card" id="score-card-speedfeel">
+                    <div class="score-number" id="score-speedfeel-value">-</div>
+                    <div class="score-label">Speed Feel</div>
+                    <span class="score-help" data-tooltip="" id="tip-speedfeel">?</span>
+                </div>
+                <div class="score-card" id="score-card-accessibility">
+                    <div class="score-number" id="score-accessibility-value">-</div>
+                    <div class="score-label">Accessibility</div>
+                    <span class="score-help" data-tooltip="" id="tip-accessibility">?</span>
+                </div>
             </div>
-            <div class="score-item" id="score-clarity">
-                <div class="score-number" id="score-clarity-value">-</div>
-                <div class="score-name">Clarity</div>
-            </div>
-            <div class="score-item" id="score-speed">
-                <div class="score-number" id="score-speed-value">-</div>
-                <div class="score-name">Speed</div>
-            </div>
-            <div class="score-item" id="score-accessibility">
-                <div class="score-number" id="score-accessibility-value">-</div>
-                <div class="score-name">Accessibility</div>
-            </div>
-            <div class="score-item overall" id="score-overall">
-                <div class="score-number" id="score-overall-value">-</div>
-                <div class="score-name">Overall</div>
-            </div>
-        </div>
+        </section>
 
-        <!-- Summary -->
-        <h2>Summary</h2>
-        <div class="summary-text" id="summary-text">Loading...</div>
+        <!-- Executive Summary -->
+        <section class="section">
+            <h2 class="section-title">Executive Summary</h2>
+            <div class="summary-text" id="summary-content">Loading analysis...</div>
+        </section>
 
-        <!-- Stats -->
-        <h2>Session Overview</h2>
-        <div class="stats-row">
-            <div class="stat-item">
-                <div class="stat-value" id="stat-clicks">-</div>
-                <div class="stat-label">Clicks</div>
-            </div>
-            <div class="stat-item">
-                <div class="stat-value" id="stat-pages">-</div>
-                <div class="stat-label">Pages</div>
-            </div>
-            <div class="stat-item">
-                <div class="stat-value" id="stat-rage-clicks">-</div>
-                <div class="stat-label">Rage Clicks</div>
-            </div>
-            <div class="stat-item">
-                <div class="stat-value" id="stat-dead-clicks">-</div>
-                <div class="stat-label">Dead Clicks</div>
-            </div>
-            <div class="stat-item">
-                <div class="stat-value" id="stat-duration">-</div>
-                <div class="stat-label">Duration</div>
-            </div>
-            <div class="stat-item">
-                <div class="stat-value" id="stat-scroll-depth">-</div>
-                <div class="stat-label">Avg Scroll</div>
-            </div>
-            <div class="stat-item">
-                <div class="stat-value" id="stat-navigations">-</div>
-                <div class="stat-label">Navigations</div>
-            </div>
-            <div class="stat-item">
-                <div class="stat-value" id="stat-unique-pages">-</div>
-                <div class="stat-label">Unique Pages</div>
-            </div>
-        </div>
+        <!-- URL Navigation Flow -->
+        <section class="section">
+            <h2 class="section-title">Navigation Flow</h2>
+            <div class="nav-flow" id="nav-flow"></div>
+        </section>
 
-        <!-- Journey -->
-        <h2>User Journey</h2>
-        <div id="journey-flow" class="journey-flow">
-            <p class="empty">Loading...</p>
-        </div>
+        <!-- Page-Level Insights -->
+        <section class="section">
+            <h2 class="section-title">Page-Level Insights</h2>
+            <div class="page-cards" id="page-cards"></div>
+        </section>
 
-        <!-- URL Analysis -->
-        <h2>URL-Level Analysis</h2>
-        <div class="table-wrap">
-            <table class="url-table">
-                <thead>
-                    <tr>
-                        <th>Page</th>
-                        <th>Title</th>
-                        <th>Visits</th>
-                        <th>Time</th>
-                        <th>Scroll</th>
-                        <th>Fold</th>
-                        <th>Clicks</th>
-                        <th>Rage</th>
-                        <th>Dead</th>
-                        <th>Engagement</th>
-                    </tr>
-                </thead>
-                <tbody id="url-metrics-body">
-                    <tr><td colspan="10" class="empty">Loading...</td></tr>
-                </tbody>
-            </table>
-        </div>
+        <!-- User Journey Table -->
+        <section class="section">
+            <h2 class="section-title">User Journey</h2>
+            <div class="table-wrap">
+                <table class="data-table journey-table">
+                    <thead>
+                        <tr>
+                            <th>Step</th>
+                            <th>Page</th>
+                            <th>State</th>
+                            <th>Time Spent</th>
+                            <th>Key Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="journey-body"></tbody>
+                </table>
+            </div>
+        </section>
 
-        <!-- Pain Points -->
-        <h2>Pain Points</h2>
-        <div id="pain-points-list">
-            <p class="empty">Loading...</p>
-        </div>
+        <!-- Friction Analysis -->
+        <section class="section">
+            <h2 class="section-title">Friction Analysis</h2>
+            <div class="table-wrap">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Issue</th>
+                            <th>Page</th>
+                            <th>Evidence</th>
+                            <th>Severity</th>
+                        </tr>
+                    </thead>
+                    <tbody id="friction-body"></tbody>
+                </table>
+            </div>
+        </section>
 
-        <!-- Suggestions -->
-        <h2>Suggestions</h2>
-        <div id="suggestions-list">
-            <p class="empty">Loading...</p>
-        </div>
+        <!-- Session Metrics -->
+        <section class="section">
+            <h2 class="section-title">Session Metrics</h2>
+            <div id="metrics-content"></div>
+        </section>
+
+        <!-- AI Suggestions -->
+        <section class="section" id="suggestions-section" style="display:none">
+            <h2 class="section-title">Recommendations</h2>
+            <div id="suggestions-content"></div>
+        </section>
+
+        <!-- Methodology -->
+        <section class="section">
+            <details class="methodology-details">
+                <summary class="methodology-summary">Methodology &amp; Scoring Logic</summary>
+                <div class="methodology-body" id="methodology-content"></div>
+            </details>
+        </section>
 
         <!-- Export -->
-        <div class="export-row">
-            <button class="btn btn-primary" id="exportPdf">Export PDF</button>
-            <button class="btn" id="exportJson">Export JSON</button>
-            <button class="btn" id="shareLink">Copy Link</button>
-        </div>
+        <section class="section export-section">
+            <button class="btn-export" id="exportJson">Export JSON</button>
+            <button class="btn-export" id="copyLink">Copy Link</button>
+        </section>
 
-        <footer class="footer">
-            Built with FlowLens AI — by Ankit Lamba
+        <footer class="report-footer">
+            Generated by FlowLens AI &middot; Deterministic UX Analysis
         </footer>
     </div>
 

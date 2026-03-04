@@ -1,566 +1,544 @@
 /**
  * FlowLens AI - Popup Script
- * Handles recording control, stats display, and report generation
+ * Reads live stats from 'flowlens_session_data' (single structured key).
  */
 
 // DOM Elements
-const recordingToggle = document.getElementById('recordingToggle');
-const generateBtn = document.getElementById('generateBtn');
-const viewReportsBtn = document.getElementById('viewReportsBtn');
-const clearDataBtn = document.getElementById('clearDataBtn');
-const confirmModal = document.getElementById('confirmModal');
-const confirmCancel = document.getElementById('confirmCancel');
-const confirmClear = document.getElementById('confirmClear');
-const loadingOverlay = document.getElementById('loadingOverlay');
+var recordingToggle = document.getElementById('recordingToggle');
+var generateBtn = document.getElementById('generateBtn');
+var clearDataBtn = document.getElementById('clearDataBtn');
+var confirmModal = document.getElementById('confirmModal');
+var confirmCancel = document.getElementById('confirmCancel');
+var confirmClear = document.getElementById('confirmClear');
+var loadingOverlay = document.getElementById('loadingOverlay');
 
 // Settings Elements
-const settingsBtn = document.getElementById('settingsBtn');
-const settingsPanel = document.getElementById('settingsPanel');
-const closeSettings = document.getElementById('closeSettings');
-const apiKeyInput = document.getElementById('apiKeyInput');
-const saveApiKeyBtn = document.getElementById('saveApiKey');
-const toggleKeyVisibility = document.getElementById('toggleKeyVisibility');
-const apiKeyBanner = document.getElementById('apiKeyBanner');
-const openSettingsFromBanner = document.getElementById('openSettingsFromBanner');
+var settingsBtn = document.getElementById('settingsBtn');
+var settingsPanel = document.getElementById('settingsPanel');
+var closeSettings = document.getElementById('closeSettings');
+var apiKeyInput = document.getElementById('apiKeyInput');
+var saveApiKeyBtn = document.getElementById('saveApiKey');
+var toggleKeyVisibility = document.getElementById('toggleKeyVisibility');
+var modeHint = document.getElementById('modeHint');
+var recordingHint = document.getElementById('recordingHint');
+var apiKeyStatus = document.getElementById('apiKeyStatus');
 
 // Stats Elements
-const pagesCount = document.getElementById('pagesCount');
-const clicksCount = document.getElementById('clicksCount');
-const rageCount = document.getElementById('rageCount');
-const deadCount = document.getElementById('deadCount');
-const timeElapsed = document.getElementById('timeElapsed');
-const sessionId = document.getElementById('sessionId');
+var pagesCount = document.getElementById('pagesCount');
+var clicksCount = document.getElementById('clicksCount');
+var rageCount = document.getElementById('rageCount');
+var deadCount = document.getElementById('deadCount');
+var timeElapsed = document.getElementById('timeElapsed');
+var sessionIdEl = document.getElementById('sessionId');
 
 // State
-let isRecording = false;
-let recordingStartTime = null;
-let statsUpdateInterval = null;
-let hasRecordingData = false;
+var isRecording = false;
+var recordingStartTime = null;
+var statsUpdateInterval = null;
+var timerInterval = null;
+var hasRecordingData = false;
 
-/**
- * Initialize popup on load
- */
-document.addEventListener('DOMContentLoaded', async () => {
-    await initializePopup();
+/* ── Init ── */
+
+document.addEventListener('DOMContentLoaded', function() {
+    initializePopup();
     setupEventListeners();
-    await checkRecordingStatus();
+    checkRecordingStatus();
 });
 
-/**
- * Initialize popup state
- */
-async function initializePopup() {
-    try {
-        const storage = await chrome.storage.local.get([
-            'flowlens_is_recording',
-            'flowlens_session_id',
-            'flowlens_start_time'
-        ]);
-
+function initializePopup() {
+    chrome.storage.local.get([
+        'flowlens_is_recording',
+        'flowlens_session_id',
+        'flowlens_start_time',
+        'flowlens_session_data'
+    ], function(storage) {
         isRecording = storage.flowlens_is_recording || false;
-        recordingStartTime = storage.flowlens_start_time || null;
+        recordingStartTime = storage.flowlens_start_time ? parseInt(storage.flowlens_start_time) : null;
 
         if (isRecording && recordingStartTime) {
-            recordingStartTime = parseInt(recordingStartTime);
             updateRecordingUI();
             startStatsUpdate();
+            // Enable button immediately if recording
+            hasRecordingData = true;
+            generateBtn.disabled = false;
         } else {
             updateRecordingUI();
         }
 
+        // Show session ID
         if (storage.flowlens_session_id) {
-            sessionId.textContent = storage.flowlens_session_id.substring(0, 8);
+            sessionIdEl.textContent = storage.flowlens_session_id.substring(0, 8);
         }
 
-        // Check if API key is set
+        // If there's existing session data from a previous recording, enable generate
+        if (storage.flowlens_session_data) {
+            hasRecordingData = true;
+            generateBtn.disabled = false;
+        }
+
         checkApiKey();
-    } catch (error) {
-        console.error('Error initializing popup:', error);
-    }
+
+        // Also load last stats immediately
+        updateStatsDisplay();
+    });
 }
 
-/**
- * Check if API key is configured
- */
-async function checkApiKey() {
-    try {
-        chrome.runtime.sendMessage({ action: 'CHECK_API_KEY' }, (response) => {
-            if (chrome.runtime.lastError) return;
-            if (response && !response.hasKey) {
-                apiKeyBanner.classList.remove('hidden');
-            } else {
-                apiKeyBanner.classList.add('hidden');
+function checkApiKey() {
+    chrome.runtime.sendMessage({ action: 'CHECK_API_KEY' }, function(response) {
+        if (chrome.runtime.lastError) return;
+        if (response && response.hasKey) {
+            // API key exists — show AI mode
+            if (modeHint) modeHint.textContent = '';
+            if (apiKeyStatus) {
+                apiKeyStatus.innerHTML = '<span style="color:#059669">API key configured</span>';
             }
-        });
-    } catch (e) {
-        // Fallback: check storage directly
-        const result = await chrome.storage.local.get('flowlens_api_key');
-        if (!result.flowlens_api_key) {
-            apiKeyBanner.classList.remove('hidden');
-        }
-    }
-}
-
-/**
- * Handle saving API key
- */
-async function handleSaveApiKey() {
-    const key = apiKeyInput.value.trim();
-    if (!key) {
-        alert('Please enter a valid API key');
-        return;
-    }
-    if (!key.startsWith('sk-ant-')) {
-        alert('That doesn\'t look like an Anthropic API key. It should start with "sk-ant-"');
-        return;
-    }
-
-    chrome.runtime.sendMessage({ action: 'SET_API_KEY', apiKey: key }, (response) => {
-        if (chrome.runtime.lastError) {
-            alert('Error saving API key');
-            return;
-        }
-        if (response && response.success) {
-            apiKeyInput.value = '';
-            apiKeyBanner.classList.add('hidden');
-            settingsPanel.classList.add('hidden');
-            // Show brief success feedback
-            const note = document.createElement('div');
-            note.className = 'key-saved-msg';
-            note.textContent = '✓ API key saved!';
-            settingsPanel.parentElement.insertBefore(note, settingsPanel.nextSibling);
-            setTimeout(() => note.remove(), 2000);
         } else {
-            alert(response?.error || 'Error saving API key');
+            // No API key — show offline mode hint
+            if (modeHint) modeHint.textContent = 'Add API key in Settings for AI-powered insights';
         }
     });
 }
 
-/**
- * Setup event listeners
- */
+/* ── Event Listeners ── */
+
 function setupEventListeners() {
     recordingToggle.addEventListener('click', handleRecordingToggle);
     generateBtn.addEventListener('click', handleGenerateReport);
-    viewReportsBtn.addEventListener('click', handleViewReports);
-    clearDataBtn.addEventListener('click', showClearConfirmation);
-    confirmCancel.addEventListener('click', hideClearConfirmation);
+    clearDataBtn.addEventListener('click', function() { confirmModal.classList.remove('hidden'); });
+    confirmCancel.addEventListener('click', function() { confirmModal.classList.add('hidden'); });
     confirmClear.addEventListener('click', handleClearData);
 
-    // Settings listeners
-    settingsBtn.addEventListener('click', () => {
-        settingsPanel.classList.toggle('hidden');
-    });
-    closeSettings.addEventListener('click', () => {
-        settingsPanel.classList.add('hidden');
-    });
-    openSettingsFromBanner.addEventListener('click', () => {
-        settingsPanel.classList.remove('hidden');
-        apiKeyBanner.classList.add('hidden');
-    });
-    toggleKeyVisibility.addEventListener('click', () => {
+    settingsBtn.addEventListener('click', function() { settingsPanel.classList.toggle('hidden'); });
+    closeSettings.addEventListener('click', function() { settingsPanel.classList.add('hidden'); });
+    toggleKeyVisibility.addEventListener('click', function() {
         apiKeyInput.type = apiKeyInput.type === 'password' ? 'text' : 'password';
-        toggleKeyVisibility.textContent = apiKeyInput.type === 'password' ? '👁' : '🙈';
     });
     saveApiKeyBtn.addEventListener('click', handleSaveApiKey);
 }
 
-/**
- * Check recording status from content script
- */
-async function checkRecordingStatus() {
-    try {
-        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (tabs.length === 0) return;
+/* ── Helper: Set recording storage keys ── */
 
-        const tab = tabs[0];
+function setRecordingStorage(sessionId) {
+    chrome.storage.local.set({
+        flowlens_is_recording: true,
+        flowlens_session_id: sessionId,
+        flowlens_start_time: recordingStartTime.toString()
+    });
+}
 
-        chrome.tabs.sendMessage(tab.id, { action: 'GET_STATUS' }, (response) => {
-            if (chrome.runtime.lastError) {
-                // Content script not loaded yet, use storage state
+/* ── Recording Toggle ── */
+
+function handleRecordingToggle() {
+    isRecording = !isRecording;
+
+    if (isRecording) {
+        // Start recording
+        recordingStartTime = Date.now();
+        var newSessionId = 'session_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
+
+        sessionIdEl.textContent = newSessionId.substring(0, 8);
+
+        chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
+            if (tabs.length === 0) return;
+            var tabId = tabs[0].id;
+            var tabUrl = tabs[0].url || '';
+
+            if (tabUrl.indexOf('chrome://') === 0 || tabUrl.indexOf('edge://') === 0 || tabUrl.indexOf('about:') === 0) {
+                alert('FlowLens cannot record on browser internal pages.');
+                isRecording = false;
+                updateRecordingUI();
                 return;
             }
-            if (response && response.isRecording !== undefined) {
-                isRecording = response.isRecording;
-                updateRecordingUI();
-                if (isRecording) {
-                    startStatsUpdate();
-                }
-            }
-        });
-    } catch (error) {
-        console.error('Error checking recording status:', error);
-    }
-}
 
-/**
- * Handle recording toggle button click
- */
-async function handleRecordingToggle() {
-    try {
-        isRecording = !isRecording;
-
-        if (isRecording) {
-            // Start recording
-            recordingStartTime = Date.now();
-
-            // Save state to storage
-            const newSessionId = generateSessionId();
-            await chrome.storage.local.set({
-                flowlens_is_recording: true,
-                flowlens_session_id: newSessionId,
-                flowlens_start_time: recordingStartTime.toString(),
-                flowlens_pages_visited: JSON.stringify([]),
-                flowlens_clicks: JSON.stringify([]),
-                flowlens_rage_clicks: JSON.stringify([]),
-                flowlens_dead_clicks: JSON.stringify([])
-            });
-
-            sessionId.textContent = newSessionId.substring(0, 8);
-
-            // Send message to content script (inject first if needed)
-            const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-            if (tabs.length > 0) {
-                const tabId = tabs[0].id;
-                const tabUrl = tabs[0].url || '';
-
-                // Skip chrome:// and edge:// pages
-                if (tabUrl.startsWith('chrome://') || tabUrl.startsWith('edge://') || tabUrl.startsWith('about:')) {
-                    alert('FlowLens cannot record on browser internal pages. Please navigate to a website first.');
-                    isRecording = false;
-                    updateRecordingUI();
-                    return;
-                }
-
-                // Try to inject content scripts first (in case they're not loaded)
-                try {
-                    await chrome.scripting.executeScript({
+            // Step 1: Check if content script is already loaded (via manifest)
+            chrome.tabs.sendMessage(tabId, { action: 'GET_STATUS' }, function(response) {
+                if (chrome.runtime.lastError || !response) {
+                    // Content script NOT loaded yet — inject it, then set storage flag
+                    chrome.scripting.executeScript({
                         target: { tabId: tabId },
                         files: ['utils/tracker.js', 'content/content.js']
-                    });
-                } catch (e) {
-                    console.log('Scripts may already be injected or page not accessible:', e.message);
-                }
-
-                // Now send the start message
-                setTimeout(() => {
-                    chrome.tabs.sendMessage(tabId, { action: 'START_RECORDING' }, () => {
+                    }, function() {
                         if (chrome.runtime.lastError) {
-                            console.log('Content script communication issue:', chrome.runtime.lastError.message);
+                            console.warn('[FlowLens Popup] Script injection failed:', chrome.runtime.lastError.message);
                         }
+                        // Now set storage — content.js will pick up the change
+                        setRecordingStorage(newSessionId);
+                        // Also send message as backup
+                        setTimeout(function() {
+                            chrome.tabs.sendMessage(tabId, { action: 'START_RECORDING' }, function() {
+                                if (chrome.runtime.lastError) { /* ok */ }
+                            });
+                        }, 500);
                     });
-                }, 200);
-            }
-
-            // Start updating stats
-            startStatsUpdate();
-            hasRecordingData = false;
-        } else {
-            // Stop recording
-            await chrome.storage.local.set({
-                flowlens_is_recording: false
+                } else {
+                    // Content script is already loaded — just set the storage flag
+                    setRecordingStorage(newSessionId);
+                    // Also send message as backup
+                    setTimeout(function() {
+                        chrome.tabs.sendMessage(tabId, { action: 'START_RECORDING' }, function() {
+                            if (chrome.runtime.lastError) { /* ok */ }
+                        });
+                    }, 200);
+                }
             });
+        });
 
-            // Send message to content script and wait for data
-            const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-            if (tabs.length > 0) {
-                chrome.tabs.sendMessage(tabs[0].id, { action: 'STOP_RECORDING' }, (response) => {
-                    if (chrome.runtime.lastError) {
-                        console.log('Content script not yet loaded');
-                    }
-                    // If we got data back from content script, enable the button directly
-                    if (response && response.data) {
-                        const d = response.data;
-                        const hasData = (d.clicks && d.clicks.length > 0) ||
-                                        (d.pages && d.pages.length > 0) ||
-                                        (d.rageClicks && d.rageClicks.length > 0) ||
-                                        (d.deadClicks && d.deadClicks.length > 0);
-                        if (hasData) {
-                            hasRecordingData = true;
-                            generateBtn.disabled = false;
-                            // Update stats from the response data
-                            pagesCount.textContent = (d.pages || []).length.toString();
-                            clicksCount.textContent = (d.clicks || []).length.toString();
-                            rageCount.textContent = (d.rageClicks || []).length.toString();
-                            deadCount.textContent = (d.deadClicks || []).length.toString();
-                        }
-                    }
-                });
+        startStatsUpdate();
+        // Enable generate button immediately — user is recording
+        hasRecordingData = true;
+        generateBtn.disabled = false;
+    } else {
+        // Stop recording
+        stopRecording();
+    }
+
+    updateRecordingUI();
+}
+
+function stopRecording() {
+    chrome.storage.local.set({ flowlens_is_recording: false });
+
+    chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
+        if (tabs.length > 0) {
+            chrome.tabs.sendMessage(tabs[0].id, { action: 'STOP_RECORDING' }, function(response) {
+                if (chrome.runtime.lastError) return;
+                if (response && response.data) {
+                    updateStatsFromData(response.data);
+                    // Explicitly write final data to storage
+                    chrome.storage.local.set({
+                        flowlens_session_data: JSON.stringify(response.data)
+                    });
+                }
+            });
+        }
+    });
+
+    stopStatsUpdate();
+    // Keep button enabled after stop
+    generateBtn.disabled = false;
+    hasRecordingData = true;
+    setTimeout(updateStatsDisplay, 500);
+}
+
+/* ── Stats ── */
+
+var pendingStatsUpdate = null;
+var lastStatsValues = {};
+
+function updateTimerDisplay() {
+    if (isRecording && recordingStartTime) {
+        var elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
+        var minutes = Math.floor(elapsed / 60);
+        var seconds = elapsed % 60;
+        var newTime = String(minutes).padStart(2, '0') + ':' + String(seconds).padStart(2, '0');
+        if (timeElapsed.textContent !== newTime) {
+            timeElapsed.textContent = newTime;
+        }
+    }
+}
+
+function startStatsUpdate() {
+    if (timerInterval) clearInterval(timerInterval);
+    if (statsUpdateInterval) clearInterval(statsUpdateInterval);
+
+    updateTimerDisplay();
+    timerInterval = setInterval(updateTimerDisplay, 500);
+
+    updateStatsDisplay();
+    statsUpdateInterval = setInterval(updateStatsDisplay, 2000);
+}
+
+function stopStatsUpdate() {
+    if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+    if (statsUpdateInterval) { clearInterval(statsUpdateInterval); statsUpdateInterval = null; }
+}
+
+function updateStatsFromData(data) {
+    if (!data) return;
+    var metrics = data.metrics || {};
+    var pages = data.pages || [];
+
+    applyStatsToDOM(metrics, pages);
+}
+
+/**
+ * Apply stats to DOM only if values have actually changed (prevents flicker)
+ */
+function applyStatsToDOM(metrics, pages) {
+    var newPages = (metrics.uniquePages || metrics.totalPages || pages.length).toString();
+    var newClicks = (metrics.totalClicks || 0).toString();
+    var newRage = (metrics.rageClickCount || 0).toString();
+    var newDead = (metrics.deadClickCount || 0).toString();
+
+    // Only update DOM if values changed
+    if (lastStatsValues.pages !== newPages) {
+        pagesCount.textContent = newPages;
+        lastStatsValues.pages = newPages;
+    }
+    if (lastStatsValues.clicks !== newClicks) {
+        clicksCount.textContent = newClicks;
+        lastStatsValues.clicks = newClicks;
+    }
+    if (lastStatsValues.rage !== newRage) {
+        rageCount.textContent = newRage;
+        lastStatsValues.rage = newRage;
+    }
+    if (lastStatsValues.dead !== newDead) {
+        deadCount.textContent = newDead;
+        lastStatsValues.dead = newDead;
+    }
+
+    hasRecordingData = (metrics.totalClicks || 0) > 0 || pages.length > 0;
+    if (hasRecordingData) generateBtn.disabled = false;
+}
+
+function updateStatsDisplay() {
+    // Debounce storage reads
+    if (pendingStatsUpdate) return;
+    pendingStatsUpdate = true;
+
+    chrome.storage.local.get(['flowlens_session_data'], function(storage) {
+        pendingStatsUpdate = false;
+        if (chrome.runtime.lastError) return;
+        var raw = storage.flowlens_session_data;
+
+        if (raw) {
+            var data;
+            if (typeof raw === 'string') {
+                try { data = JSON.parse(raw); } catch (e) { data = null; }
+            } else {
+                data = raw;
             }
 
-            // Stop updating stats
-            stopStatsUpdate();
-
-            // Wait a moment for storage sync, then update stats display
-            setTimeout(async () => {
-                await updateStatsDisplay();
-            }, 500);
+            if (data) {
+                var metrics = data.metrics || {};
+                var pages = data.pages || [];
+                applyStatsToDOM(metrics, pages);
+            }
         }
-
-        updateRecordingUI();
-    } catch (error) {
-        console.error('Error toggling recording:', error);
-        isRecording = !isRecording;
-        updateRecordingUI();
-    }
+    });
 }
 
-/**
- * Generate session ID
- */
-function generateSessionId() {
-    return 'session_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
-}
+/* ── UI State ── */
 
-/**
- * Start stats update interval
- */
-function startStatsUpdate() {
-    if (statsUpdateInterval) {
-        clearInterval(statsUpdateInterval);
-    }
-
-    // Update immediately
-    updateStatsDisplay();
-
-    // Update every second
-    statsUpdateInterval = setInterval(() => {
-        updateStatsDisplay();
-    }, 1000);
-}
-
-/**
- * Stop stats update interval
- */
-function stopStatsUpdate() {
-    if (statsUpdateInterval) {
-        clearInterval(statsUpdateInterval);
-        statsUpdateInterval = null;
-    }
-}
-
-/**
- * Update stats display from storage
- */
-async function updateStatsDisplay() {
-    try {
-        const storage = await chrome.storage.local.get([
-            'flowlens_pages_visited',
-            'flowlens_clicks',
-            'flowlens_rage_clicks',
-            'flowlens_dead_clicks'
-        ]);
-
-        const pages = storage.flowlens_pages_visited ? JSON.parse(storage.flowlens_pages_visited) : [];
-        const clicks = storage.flowlens_clicks ? JSON.parse(storage.flowlens_clicks) : [];
-        const rageClicks = storage.flowlens_rage_clicks ? JSON.parse(storage.flowlens_rage_clicks) : [];
-        const deadClicks = storage.flowlens_dead_clicks ? JSON.parse(storage.flowlens_dead_clicks) : [];
-
-        // Update stats
-        pagesCount.textContent = pages.length.toString();
-        clicksCount.textContent = clicks.length.toString();
-        rageCount.textContent = rageClicks.length.toString();
-        deadCount.textContent = deadClicks.length.toString();
-
-        // Update time elapsed if recording
-        if (isRecording && recordingStartTime) {
-            const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
-            const minutes = Math.floor(elapsed / 60);
-            const seconds = elapsed % 60;
-            timeElapsed.textContent = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-        }
-
-        // Check if we have recording data
-        hasRecordingData = clicks.length > 0 || pages.length > 0 || rageClicks.length > 0 || deadClicks.length > 0;
-        generateBtn.disabled = !hasRecordingData;
-
-    } catch (error) {
-        console.error('Error updating stats display:', error);
-    }
-}
-
-/**
- * Update recording UI based on state
- */
 function updateRecordingUI() {
     if (isRecording) {
         recordingToggle.classList.remove('stopped');
         recordingToggle.classList.add('recording');
         recordingToggle.dataset.state = 'recording';
-        recordingToggle.innerHTML = '<span class="btn-icon">🔴</span><span class="btn-text">Stop Recording</span>';
-        recordingToggle.style.pointerEvents = 'auto';
+        recordingToggle.innerHTML = '<span class="rec-dot"></span><span class="btn-text">Stop Analysis</span>';
     } else {
         recordingToggle.classList.remove('recording');
         recordingToggle.classList.add('stopped');
         recordingToggle.dataset.state = 'stopped';
-        recordingToggle.innerHTML = '<span class="btn-icon">⚫</span><span class="btn-text">Start Recording</span>';
-        recordingToggle.style.pointerEvents = 'auto';
+        recordingToggle.innerHTML = '<span class="btn-text">Start Analysis</span>';
+    }
+}
+
+/* ── Generate Report (auto-stops recording, waits for sync, then generates) ── */
+
+function handleGenerateReport() {
+    if (!hasRecordingData) {
+        alert('No data recorded yet. Start analysis first.');
+        return;
+    }
+
+    showLoading();
+
+    // Auto-stop recording first if active, then generate
+    if (isRecording) {
+        isRecording = false;
+        stopStatsUpdate();
+        updateRecordingUI();
+
+        // Set storage flag to false — content.js detects this and stops + does final sync
+        chrome.storage.local.set({ flowlens_is_recording: false });
+
+        chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
+            if (tabs.length > 0) {
+                var tabId = tabs[0].id;
+
+                // Try to get final data directly from content script
+                chrome.tabs.sendMessage(tabId, { action: 'STOP_RECORDING' }, function(response) {
+                    if (!chrome.runtime.lastError && response && response.data) {
+                        // Got data from content script — write to storage, then generate
+                        chrome.storage.local.set({
+                            flowlens_session_data: JSON.stringify(response.data)
+                        }, function() {
+                            triggerGenerate();
+                        });
+                    } else {
+                        // Message failed — try executeScript as last resort
+                        fetchDataViaExecuteScript(tabId, function() {
+                            triggerGenerate();
+                        });
+                    }
+                });
+            } else {
+                // No active tab — try generating from whatever is in storage
+                setTimeout(triggerGenerate, 500);
+            }
+        });
+    } else {
+        // Not recording, generate immediately from storage
+        triggerGenerate();
     }
 }
 
 /**
- * Handle generate report button click
+ * Last-resort: inject a script to grab FlowLensTracker.getData() directly.
+ * Tries ISOLATED world first (where content scripts live), then MAIN world.
  */
-async function handleGenerateReport() {
-    try {
-        if (!hasRecordingData) {
-            alert('No recording data available. Please record some user interactions first.');
-            return;
+function fetchDataViaExecuteScript(tabId, callback) {
+    var fetchFunc = function() {
+        if (typeof FlowLensTracker !== 'undefined') {
+            try {
+                FlowLensTracker.stop();
+                return FlowLensTracker.getData();
+            } catch (e) {
+                return null;
+            }
         }
+        return null;
+    };
 
-        showLoadingOverlay();
-
-        // Send message to background script to generate report
-        chrome.runtime.sendMessage(
-            { action: 'GENERATE_REPORT' },
-            (response) => {
-                hideLoadingOverlay();
-
-                if (chrome.runtime.lastError) {
-                    console.error('Error generating report:', chrome.runtime.lastError);
-                    alert('Error generating report. Please try again.');
+    chrome.scripting.executeScript({
+        target: { tabId: tabId },
+        func: fetchFunc
+    }, function(results) {
+        if (chrome.runtime.lastError || !results || !results[0] || !results[0].result) {
+            // Try MAIN world as fallback
+            chrome.scripting.executeScript({
+                target: { tabId: tabId },
+                func: fetchFunc,
+                world: 'MAIN'
+            }, function(results2) {
+                if (chrome.runtime.lastError || !results2 || !results2[0] || !results2[0].result) {
+                    setTimeout(callback, 300);
                     return;
                 }
-
-                if (response && response.success && response.reportId) {
-                    // Report page is opened by background script automatically
-                    console.log('Report generated:', response.reportId);
-                } else {
-                    const errorMsg = response?.error || 'Error generating report. Please try again.';
-                    alert(errorMsg);
-                }
-            }
-        );
-    } catch (error) {
-        hideLoadingOverlay();
-        console.error('Error handling generate report:', error);
-        alert('Error generating report. Please try again.');
-    }
+                var data = results2[0].result;
+                chrome.storage.local.set({
+                    flowlens_session_data: JSON.stringify(data)
+                }, callback);
+            });
+            return;
+        }
+        var data = results[0].result;
+        chrome.storage.local.set({
+            flowlens_session_data: JSON.stringify(data)
+        }, callback);
+    });
 }
 
-/**
- * Handle view reports button click
- */
-function handleViewReports() {
-    try {
-        const reportsUrl = chrome.runtime.getURL('reports/reports.html');
-        chrome.tabs.create({ url: reportsUrl });
-    } catch (error) {
-        console.error('Error opening reports page:', error);
-    }
+function triggerGenerate() {
+    chrome.runtime.sendMessage({ action: 'GENERATE_REPORT' }, function(response) {
+        hideLoading();
+        if (chrome.runtime.lastError) {
+            alert('Error: ' + chrome.runtime.lastError.message);
+            return;
+        }
+        if (response && response.success) {
+            // report page opened by background.js
+        } else {
+            alert(response && response.error ? response.error : 'Error generating report. Make sure you recorded some interactions.');
+        }
+    });
 }
 
-/**
- * Show clear data confirmation modal
- */
-function showClearConfirmation() {
-    confirmModal.classList.remove('hidden');
-}
+/* ── Clear Data ── */
 
-/**
- * Hide clear data confirmation modal
- */
-function hideClearConfirmation() {
+function handleClearData() {
+    isRecording = false;
+    stopStatsUpdate();
+    recordingStartTime = null;
+
+    // Step 1: Send RESET to ALL tabs (not just active tab) to clear in-memory tracker state
+    chrome.tabs.query({}, function(tabs) {
+        for (var i = 0; i < tabs.length; i++) {
+            try {
+                chrome.tabs.sendMessage(tabs[i].id, { action: 'RESET_TRACKER' }, function() {
+                    if (chrome.runtime.lastError) { /* ok - tab may not have content script */ }
+                });
+            } catch(e) { /* ok */ }
+        }
+    });
+
+    // Step 2: Clear ALL flowlens storage keys including reports
+    chrome.storage.local.remove([
+        'flowlens_is_recording', 'flowlens_session_id', 'flowlens_start_time',
+        'flowlens_session_data', 'flowlens_last_session_data', 'flowlens_last_sync',
+        'flowlens_reports', 'flowlens_recording_state'
+    ]);
+
+    // Step 3: Reset UI
+    pagesCount.textContent = '0';
+    clicksCount.textContent = '0';
+    rageCount.textContent = '0';
+    deadCount.textContent = '0';
+    timeElapsed.textContent = '00:00';
+    sessionIdEl.textContent = '\u2014';
+    generateBtn.disabled = true;
+    hasRecordingData = false;
+    lastStatsValues = {};
+    updateRecordingUI();
     confirmModal.classList.add('hidden');
 }
 
-/**
- * Handle clear data confirmation
- */
-async function handleClearData() {
-    try {
-        // Stop recording first
-        if (isRecording) {
-            isRecording = false;
-            stopStatsUpdate();
+/* ── API Key ── */
 
-            // Notify content script
-            const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-            if (tabs.length > 0) {
-                chrome.tabs.sendMessage(tabs[0].id, { action: 'STOP_RECORDING' }, () => {
-                    if (chrome.runtime.lastError) {
-                        console.log('Content script not yet loaded');
-                    }
-                });
-            }
-        }
-
-        // Clear all FlowLens data from storage
-        await chrome.storage.local.remove([
-            'flowlens_is_recording',
-            'flowlens_session_id',
-            'flowlens_start_time',
-            'flowlens_pages_visited',
-            'flowlens_clicks',
-            'flowlens_rage_clicks',
-            'flowlens_dead_clicks'
-        ]);
-
-        // Reset UI
-        pagesCount.textContent = '0';
-        clicksCount.textContent = '0';
-        rageCount.textContent = '0';
-        deadCount.textContent = '0';
-        timeElapsed.textContent = '00:00';
-        sessionId.textContent = '—';
-        generateBtn.disabled = true;
-        hasRecordingData = false;
-
-        updateRecordingUI();
-        hideClearConfirmation();
-    } catch (error) {
-        console.error('Error clearing data:', error);
-        alert('Error clearing data. Please try again.');
+function handleSaveApiKey() {
+    var key = apiKeyInput.value.trim();
+    if (!key) { alert('Please enter a valid API key'); return; }
+    if (key.indexOf('sk-ant-') !== 0) {
+        alert('Key should start with "sk-ant-"');
+        return;
     }
-}
 
-/**
- * Show loading overlay
- */
-function showLoadingOverlay() {
-    loadingOverlay.classList.remove('hidden');
-}
-
-/**
- * Hide loading overlay
- */
-function hideLoadingOverlay() {
-    loadingOverlay.classList.add('hidden');
-}
-
-/**
- * Listen for messages from background script
- */
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === 'REPORT_READY') {
-        hideLoadingOverlay();
-        if (request.reportId) {
-            const reportUrl = chrome.runtime.getURL('reports/report.html?id=' + request.reportId);
-            chrome.tabs.create({ url: reportUrl });
+    chrome.runtime.sendMessage({ action: 'SET_API_KEY', apiKey: key }, function(response) {
+        if (chrome.runtime.lastError) { alert('Error saving key'); return; }
+        if (response && response.success) {
+            apiKeyInput.value = '';
+            settingsPanel.classList.add('hidden');
+            checkApiKey(); // Refresh the mode hint
+        } else {
+            alert('Error saving key');
         }
+    });
+}
+
+/* ── Loading ── */
+
+function showLoading() { loadingOverlay.classList.remove('hidden'); }
+function hideLoading() { loadingOverlay.classList.add('hidden'); }
+
+/* ── Listeners ── */
+
+chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
+    if (request.action === 'REPORT_READY') {
+        hideLoading();
     } else if (request.action === 'DATA_UPDATED') {
-        // Update stats when data changes
         updateStatsDisplay();
     }
     sendResponse({ success: true });
 });
 
-/**
- * Listen for storage changes
- */
-chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName === 'local') {
-        // Update stats when storage changes (both during and after recording)
-        if (changes.flowlens_clicks || changes.flowlens_pages_visited ||
-            changes.flowlens_rage_clicks || changes.flowlens_dead_clicks) {
-            updateStatsDisplay();
-        }
-    }
-});
+// Note: Removed duplicate storage.onChanged listener that caused flickering.
+// Stats update is now handled only by the polling interval (1.5s).
 
-/**
- * Clean up on popup close
- */
-window.addEventListener('unload', () => {
-    stopStatsUpdate();
-});
+function checkRecordingStatus() {
+    chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
+        if (tabs.length === 0) return;
+        chrome.tabs.sendMessage(tabs[0].id, { action: 'GET_STATUS' }, function(response) {
+            if (chrome.runtime.lastError) return;
+            if (response && response.isRecording !== undefined) {
+                isRecording = response.isRecording;
+                updateRecordingUI();
+                if (isRecording) startStatsUpdate();
+            }
+        });
+    });
+}
+
+window.addEventListener('unload', function() { stopStatsUpdate(); });
